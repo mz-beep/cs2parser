@@ -87,9 +87,13 @@ describe('createAllocator', () => {
 		expect(() => allocator.alloc(-1)).toThrow(RangeError);
 	});
 
-	test('throws on out of memory', () => {
+	test('grows pool when a single arena is too small', () => {
 		const allocator = createAllocator(64);
-		expect(() => allocator.alloc(128)).toThrow('Out of memory');
+		const view = allocator.alloc(128);
+		expect(view.byteLength).toBe(128);
+		const s = allocator.stats();
+		expect(s.totalBytes).toBeGreaterThanOrEqual(128);
+		expect(s.usedBytes).toBe(128);
 	});
 
 	test('throws on double free', () => {

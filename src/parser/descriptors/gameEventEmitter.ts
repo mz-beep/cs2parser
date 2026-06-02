@@ -11,6 +11,9 @@ import EventEmitter from 'events';
 
 const SYNTHETIC_EVENTS = new Set(['round_start', 'round_end']);
 
+const ROUND_END_COUNT_PROP = 'CCSGameRulesProxy.CCSGameRules.m_nRoundEndCount';
+const ROUND_START_COUNT_PROP = 'CCSGameRulesProxy.CCSGameRules.m_nRoundStartCount';
+
 export class GameEvents extends EventEmitter<GameEventsArguments> {
 	_eventDescriptors: Record<number, CMsgSource1LegacyGameEventList_descriptor_t> = {};
 	private _demoReader!: DemoReader;
@@ -43,8 +46,9 @@ export class GameEvents extends EventEmitter<GameEventsArguments> {
 			const descriptor = this._eventDescriptors[gameEvent.eventid ?? -1];
 			if (!descriptor?.name) return;
 
-			// Suppress raw round_start/round_end when entity parsing is active (synthetic versions will be emitted)
-			if (this._entityMode !== EntityMode.NONE && SYNTHETIC_EVENTS.has(descriptor.name)) return;
+			// Suppress raw round_start/round_end only when synthetic counters are available on game rules.
+			// Older demos omit m_nRound*Count — fall back to network events instead of dropping them.
+			if (SYNTHETIC_EVENTS.has(descriptor.name) && this._shouldSuppressRawRoundEvents()) return;
 
 			if (
 				!this.eventNames().includes(descriptor.name as keyof _GameEventsArguments) &&
@@ -80,6 +84,16 @@ export class GameEvents extends EventEmitter<GameEventsArguments> {
 		});
 	};
 
+	/** True when EntityMode parses entities and game rules expose synthetic round counters. */
+	private _shouldSuppressRawRoundEvents(): boolean {
+		if (this._entityMode === EntityMode.NONE) return false;
+
+		const props = this._demoReader.gameRules?.entity?.properties as Record<string, unknown> | undefined;
+		if (!props) return false;
+
+		return props[ROUND_END_COUNT_PROP] !== undefined || props[ROUND_START_COUNT_PROP] !== undefined;
+	}
+
 	private _checkSyntheticRoundEvents() {
 		const gameRules = this._demoReader.gameRules;
 		if (!gameRules) return;
@@ -88,8 +102,8 @@ export class GameEvents extends EventEmitter<GameEventsArguments> {
 		if (!entity?.properties) return;
 
 		const props = entity.properties as any;
-		const roundEndCount = props['CCSGameRulesProxy.CCSGameRules.m_nRoundEndCount'] as number | undefined;
-		const roundStartCount = props['CCSGameRulesProxy.CCSGameRules.m_nRoundStartCount'] as number | undefined;
+		const roundEndCount = props[ROUND_END_COUNT_PROP] as number | undefined;
+		const roundStartCount = props[ROUND_START_COUNT_PROP] as number | undefined;
 
 		// Check round_end first (end of previous round fires before start of new round)
 		if (roundEndCount !== undefined) {
