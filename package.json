@@ -1,15 +1,19 @@
 {
-	"version": "1.9.1",
-	"name": "cs2parser",
+	"name": "@mz-beep/cs2parser",
+	"version": "1.9.1-epicclips.1",
+	"description": "Fork of cs2parser with legacy-demo fixes (allocator growth, raw round events fallback)",
 	"type": "module",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/osztenkurden/cs2parser.git"
+		"url": "git+https://github.com/mz-beep/cs2parser.git"
 	},
 	"bugs": {
-		"url": "https://github.com/osztenkurden/cs2parser/issues"
+		"url": "https://github.com/mz-beep/cs2parser/issues"
 	},
-	"homepage": "https://github.com/osztenkurden/cs2parser#readme",
+	"homepage": "https://github.com/mz-beep/cs2parser#readme",
+	"publishConfig": {
+		"access": "public"
+	},
 	"dependencies": {
 		"@bufbuild/protobuf": "^2.10.0",
 		"snappy": "^7.3.3"
@@ -19,8 +23,9 @@
 		"node": ">=22.0.0"
 	},
 	"files": [
-		"./dist",
-		"ACKNOWLEDGEMENTS"
+		"dist",
+		"ACKNOWLEDGEMENTS",
+		"README.md"
 	],
 	"types": "./dist/index.d.mts",
 	"exports": {
