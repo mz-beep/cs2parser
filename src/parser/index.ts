@@ -1,4 +1,7 @@
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { randomUUID } from 'crypto';
 import { type CDemoFileHeader, EDemoCommands } from '../ts-proto/demo.js';
 import { decoders } from './descriptors/decoders.js';
 import { BitBuffer } from './ubitreader.js';
@@ -427,7 +430,7 @@ export class DemoReader extends EventEmitter<{
 		this._hasEnded = true;
 	}
 
-	/** Non-blocking parse from a file path using chunked reads (low memory). */
+	/** Read demo from disk in a sliding window (grows for oversized frames; demoparser-style I/O). */
 	private async _parseFile(filePath: string, opts: { entities?: EntityMode } & ParseSettings = {}) {
 		const entityMode = opts.entities ?? EntityMode.NONE;
 		this._directWriteMode = true;
@@ -437,86 +440,32 @@ export class DemoReader extends EventEmitter<{
 		this._hasEnded = true;
 	}
 
-	/** Core streaming parse from a Readable. */
-	private _parseStream(stream: Readable, opts: { entities?: EntityMode } & ParseSettings = {}): Promise<void> {
-		const entityMode = opts.entities ?? EntityMode.NONE;
+	/**
+	 * Parse from a Readable by spooling to a temp file, then chunked disk reads.
+	 * Avoids holding the full demo in RAM (unlike Buffer.concat) and avoids mis-parsing
+	 * when Node stream chunks split demo frames.
+	 */
+	private async _parseStream(stream: Readable, opts: { entities?: EntityMode } & ParseSettings = {}): Promise<void> {
 		this._stream = stream;
-		this._directWriteMode = true;
-		this.gameEvents.entityMode = entityMode;
+		const tmpPath = path.join(os.tmpdir(), `cs2parser-${randomUUID()}.dem`);
 
-		const { promise, resolve } = Promise.withResolvers<void>();
+		await new Promise<void>((resolve, reject) => {
+			const out = fs.createWriteStream(tmpPath);
+			stream.pipe(out);
+			out.on('finish', () => resolve());
+			out.on('error', reject);
+			stream.on('error', reject);
+		});
 
-		let session: ParseSession | null = null;
-		let finished = false;
-		let pendingChunks: Buffer[] = [];
+		this._stream = null;
 
-		const finish = () => {
-			finished = true;
-			stream.off('data', onData);
-			stream.off('error', onError);
-			stream.off('end', onEnd);
-			this._directWriteMode = false;
-			this._hasEnded = true;
-		};
-
-		const tryInit = () => {
-			const totalPending = pendingChunks.reduce((s, c) => s + c.length, 0);
-			if (totalPending < 16) return false;
-
-			session = new ParseSession(Buffer.concat(pendingChunks), entityMode, this._emitQueue, this, opts);
-			pendingChunks = [];
-			return true;
-		};
-
-		const onData = (chunk: Buffer) => {
-			if (finished) return;
-
-			if (!session) {
-				pendingChunks.push(chunk);
-				if (!tryInit()) return;
-			} else {
-				session.pushChunk(chunk);
-			}
-
+		try {
+			await this._parseFile(tmpPath, opts);
+		} finally {
 			try {
-				const more = session!.processFrames();
-				if (!more) {
-					session!.flush();
-					finish();
-					resolve();
-				}
-			} catch (e) {
-				finish();
-				const error = e instanceof Error ? e : new Error(`Exception during parsing: ${e}`);
-				this.emit('end', { error, incomplete: false });
-				resolve();
-			}
-		};
-
-		const onError = (err: Error) => {
-			if (finished) return;
-			finish();
-			this.emit('end', { error: err, incomplete: true });
-			resolve();
-		};
-
-		const onEnd = () => {
-			if (finished) return;
-			if (session) {
-				try {
-					session.processFrames();
-				} catch {}
-			}
-			finish();
-			this.emit('end', { incomplete: true });
-			resolve();
-		};
-
-		stream.on('data', onData);
-		stream.on('error', onError);
-		stream.on('end', onEnd);
-
-		return promise;
+				fs.unlinkSync(tmpPath);
+			} catch {}
+		}
 	}
 
 	/**
@@ -531,13 +480,13 @@ export class DemoReader extends EventEmitter<{
 	 *   - `EntityMode.ONLY_GAME_RULES` — parse entities but only store game rules (enables synthetic round_start/round_end events)
 	 *
 	 * @example
-	 * // File path (streams by default — non-blocking, low memory)
+	 * // File path (chunked disk reads, default — low memory, grows buffer for large frames)
 	 * await parser.parseDemo('demo.dem', { entities: EntityMode.ALL });
 	 *
-	 * // File path with chunked reads (non-blocking, low memory)
+	 * // File path, same chunked reader (alias of default path handling)
 	 * await parser.parseDemo('demo.dem', { entities: EntityMode.ALL, stream: false });
 	 *
-	 * // Readable stream
+	 * // Readable stream (spooled to temp file, then parsed from disk — not full RAM)
 	 * await parser.parseDemo(createReadStream('demo.dem'), { entities: EntityMode.ALL });
 	 *
 	 * // Pre-loaded buffer (non-blocking)

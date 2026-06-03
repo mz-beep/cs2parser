@@ -29,6 +29,7 @@ export class ParseSession {
 	// Module-level singletons (shared across sessions)
 	private static readonly PACKET_TEMP_BUFFER = new Uint8Array(new ArrayBuffer(2 ** 18));
 	private static readonly entityAllocator = createAllocator();
+	/** Initial window for file/stream reads; grows when a demo frame exceeds the window. */
 	private static readonly READ_BUFFER_SIZE = 4 * 1024 * 1024; // 4 MB
 
 	// Buffer state (replaces ByteBuffer for zero-overhead frame reading)
@@ -404,51 +405,72 @@ export class ParseSession {
 		const remaining = this._frameLimit - this._frameOffset;
 		if (remaining >= bytes) return true;
 
-		// File-based path: compact and refill from fd
+		// File-based path: compact and refill from fd (grows read buffer as needed)
 		if (this.fd !== null && this.fileOffset < this.fileSize) {
 			return this.refillFromFile(bytes);
 		}
 
-		// Stream-based path: coalesce pending chunks
-		let left = bytes - remaining;
-		for (let i = 0; i < this.chunks.length && left > 0; ++i) left -= this.chunks[i]!.length;
-
-		// We don't have enough bytes with what we have buffered up
-		if (left > 0) return false;
+		// Stream-based path: coalesce pending chunks when enough data has arrived
+		let pendingLen = 0;
+		for (const chunk of this.chunks) pendingLen += chunk.length;
+		if (remaining + pendingLen < bytes) return false;
 
 		const mark = Math.max(0, this._frameMarked);
 		const newOffset = this._frameOffset - mark;
-
-		// Coalesce: keep unread bytes from current position, append pending chunks
 		const unread = this._frameBuf.subarray(mark, this._frameLimit);
-		const merged = Buffer.concat([unread, ...this.chunks]);
+		const merged = Buffer.concat([Buffer.from(unread), ...this.chunks]);
+		this.chunks = [];
 		this._frameBuf = merged;
 		this._frameOffset = newOffset;
 		this._frameLimit = merged.length;
-		this.chunks = [];
 
-		return true;
+		return this._frameLimit - this._frameOffset >= bytes;
 	}
 
-	/** Compact unread bytes to the start of readBuffer and read more from the file. */
-	private refillFromFile(needed: number): boolean {
+	/** Grow file read buffer so at least `minCapacity` bytes are addressable. */
+	private growReadBuffer(minCapacity: number, unread: number): void {
 		const buf = this.readBuffer!;
-		const unread = this._frameLimit - this._frameOffset;
+		if (buf.length >= minCapacity) return;
 
-		// Copy unconsumed bytes to the start of the read buffer
+		const cap = Math.min(
+			Math.max(minCapacity, buf.length * 2, ParseSession.READ_BUFFER_SIZE),
+			Math.max(this.fileSize, unread) + 64
+		);
+		const grown = Buffer.alloc(cap);
 		if (unread > 0) {
-			buf.copyWithin(0, this._frameOffset, this._frameOffset + unread);
+			const src = this._frameBuf.subarray(this._frameOffset, this._frameOffset + unread);
+			grown.set(src, 0);
+		}
+		this.readBuffer = grown;
+	}
+
+	/** Compact unread bytes to the start of readBuffer and read from disk until `needed` bytes are available. */
+	private refillFromFile(needed: number): boolean {
+		const unread = this._frameLimit - this._frameOffset;
+		this.growReadBuffer(Math.max(needed, unread + (this.fileSize - this.fileOffset)), unread);
+
+		const buf = this.readBuffer!;
+		if (unread > 0) {
+			const src = this._frameBuf.subarray(this._frameOffset, this._frameOffset + unread);
+			buf.set(src, 0);
 		}
 
-		// Fill the rest from file
-		const space = buf.length - unread;
-		const toRead = Math.min(space, this.fileSize - this.fileOffset);
-		if (toRead > 0) {
-			fs.readSync(this.fd!, buf, unread, toRead, this.fileOffset);
+		let totalAvailable = unread;
+		while (totalAvailable < needed && this.fileOffset < this.fileSize) {
+			if (totalAvailable >= buf.length) {
+				this.growReadBuffer(
+					totalAvailable + Math.min(this.fileSize - this.fileOffset, ParseSession.READ_BUFFER_SIZE),
+					totalAvailable
+				);
+			}
+			const space = buf.length - totalAvailable;
+			const toRead = Math.min(space, this.fileSize - this.fileOffset);
+			if (toRead <= 0) break;
+			fs.readSync(this.fd!, buf, totalAvailable, toRead, this.fileOffset);
 			this.fileOffset += toRead;
+			totalAvailable += toRead;
 		}
 
-		const totalAvailable = unread + toRead;
 		this._frameBuf = buf.subarray(0, totalAvailable);
 		this._frameOffset = 0;
 		this._frameLimit = totalAvailable;
